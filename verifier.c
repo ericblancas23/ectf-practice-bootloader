@@ -109,6 +109,69 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
+        unsigned char signature[SIGNATURE_SIZE];
+    size_t firmware_length = 0;
+    size_t signature_length = 0;
+    int result = EXIT_FAILURE;
+
+    if (!read_file(argv[1], firmware, capacity, &firmware_length) ||
+        !read_file(argv[2], signature, sizeof(signature),
+                   &signature_length)) {
+        goto cleanup;
+    }
+
+    if (firmware_length < HEADER_SIZE) {
+        fprintf(stderr, "REJECT: truncated header\n");
+        goto cleanup;
+    }
+
+    if (memcmp(firmware, "FWUP", 4) != 0) {
+        fprintf(stderr, "REJECT: incorrect magic marker\n");
+        goto cleanup;
+    }
+
+    uint32_t version = read_u32_le(firmware + 4);
+    uint32_t payload_length = read_u32_le(firmware + 8);
+
+    if (payload_length == 0 || payload_length > MAX_PAYLOAD) {
+        fprintf(stderr, "REJECT: invalid payload length\n");
+        goto cleanup;
+    }
+
+    if ((size_t)payload_length != firmware_length - HEADER_SIZE) {
+        fprintf(stderr, "REJECT: payload length mismatch\n");
+        goto cleanup;
+    }
+
+    if (signature_length != SIGNATURE_SIZE) {
+        fprintf(stderr, "REJECT: incorrect signature length\n");
+        goto cleanup;
+    }
+
+    if (!verify_signature(argv[3], firmware, firmware_length,
+                          signature, signature_length)) {
+        fprintf(stderr, "REJECT: signature verification failed\n");
+        goto cleanup;
+    }
+
+    /* Apply version policy after authenticating the package. */
+    if (version < MIN_VERSION) {
+        fprintf(stderr,
+                "REJECT: version %" PRIu32 " is below minimum %u\n",
+                version, MIN_VERSION);
+        goto cleanup;
+    }
+
+    printf("ACCEPT: firmware version %" PRIu32
+           ", payload %" PRIu32 " bytes\n",
+           version, payload_length);
+
+    result = EXIT_SUCCESS;
+
+cleanup:
+    free(firmware);
+    return result;
+
 }
 
 
