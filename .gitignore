@@ -1,1 +1,5 @@
 keys/*
+verifier
+*.bin
+*.sig
+__pycache__/
