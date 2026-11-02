@@ -96,7 +96,19 @@ static int verify_signature(const char *public_key_path,
 
 
 int main(int argc, char **argv) {
-    
+    if(argc != 4) {
+        fprintf(stderr, "Usage %s firmeware.bin signature.sig public_key.pem\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    const size_t capacity = HEADER_SIZE + MAX_PAYLOAD;
+    unsigned char *firmware = malloc(capacity);
+
+    if(firmware == NULL) {
+        fprintf(stderr, "Error: memory allocation failed");
+        return EXIT_FAILURE;
+    }
+
 }
 
 
