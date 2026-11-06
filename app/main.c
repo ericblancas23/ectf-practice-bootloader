@@ -7,6 +7,6 @@ int main(void)
 
     for (;;) {
         GPIOA->ODR ^= (1u << 5);                  /* toggle LD2 */
-        for (volatile uint32_t i = 0; i < 200000; i++) { }
+        for (volatile uint32_t i = 0; i < 500000; i++) { }
     }
 }
