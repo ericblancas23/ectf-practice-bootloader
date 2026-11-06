@@ -15,7 +15,7 @@ typedef enum {
 typedef struct {
     uint32_t version;
     uint32_t payload_length;
-    uint32_t load_address;
+    uint32_t load_addr;
 } img_info;
 
 img_result img_verify(const uint8_t *image, size_t available, uint32_t expected_addr, uint32_t min_version, const uint8_t public_key[32], img_info *out);
