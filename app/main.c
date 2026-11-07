@@ -1,4 +1,7 @@
 #include "stm32l4xx.h"
+#ifndef BLINK_DELAY
+#define BLINK_DELAY 500000
+#endif 
 
 int main(void)
 {
@@ -7,6 +10,6 @@ int main(void)
 
     for (;;) {
         GPIOA->ODR ^= (1u << 5);                  /* toggle LD2 */
-        for (volatile uint32_t i = 0; i < 500000; i++) { }
+        for (volatile uint32_t i = 0; i < BLINK_DELAY; i++) { }
     }
 }

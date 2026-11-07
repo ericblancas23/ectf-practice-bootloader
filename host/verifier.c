@@ -2,187 +2,84 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
-#include <openssl/evp.h>
-#include <openssl/pem.h>
+#include "verify_core.h"
 
-#define HEADER_SIZE 12u
 #define MAX_PAYLOAD (1024u * 1024u)
-#define SIGNATURE_SIZE 64u
+#define DEFAULT_MIN_VERSION 2u
 
-/* Practice policy: accept version 2 or newer. */
-#define MIN_VERSION 2u
-
-/*
- * Read at most capacity bytes.
- * Reject files that are larger than the destination buffer.
- */
-static int read_file(const char *path,
-                     unsigned char *buffer,
-                     size_t capacity,
-                     size_t *length)
+static int read_file(const char *path, uint8_t *buffer,
+                     size_t capacity, size_t *length)
 {
     FILE *file = fopen(path, "rb");
-
-    if (file == NULL) {
-        perror(path);
-        return 0;
-    }
+    if (file == NULL) { perror(path); return 0; }
 
     size_t count = fread(buffer, 1, capacity, file);
     int extra = fgetc(file);
     int failed = ferror(file);
-
     fclose(file);
 
-    if (failed) {
-        fprintf(stderr, "REJECT: could not read %s\n", path);
-        return 0;
-    }
-
-    if (extra != EOF) {
-        fprintf(stderr, "REJECT: file too large: %s\n", path);
-        return 0;
-    }
+    if (failed) { fprintf(stderr, "REJECT: could not read %s\n", path); return 0; }
+    if (extra != EOF) { fprintf(stderr, "REJECT: file too large: %s\n", path); return 0; }
 
     *length = count;
     return 1;
 }
 
-/* Decode four bytes without relying on struct layout or alignment. */
-static uint32_t read_u32_le(const unsigned char *bytes)
+static const char *result_name(img_result r)
 {
-    return (uint32_t)bytes[0]
-         | ((uint32_t)bytes[1] << 8)
-         | ((uint32_t)bytes[2] << 16)
-         | ((uint32_t)bytes[3] << 24);
-}
-
-static int verify_signature(const char *public_key_path,
-                            const unsigned char *data,
-                            size_t data_length,
-                            const unsigned char *signature,
-                            size_t signature_length)
-{
-    FILE *file = fopen(public_key_path, "rb");
-
-    if (file == NULL) {
-        perror(public_key_path);
-        return 0;
+    switch (r) {
+    case IMG_OK:          return "ok";
+    case IMG_ERR_SIZE:    return "image too small";
+    case IMG_ERR_MAGIC:   return "incorrect magic marker";
+    case IMG_ERR_LENGTH:  return "invalid payload length";
+    case IMG_ERR_ADDR:    return "wrong load address";
+    case IMG_ERR_SIG:     return "signature verification failed";
+    case IMG_ERR_VERSION: return "version below minimum";
     }
-
-    EVP_PKEY *key = PEM_read_PUBKEY(file, NULL, NULL, NULL);
-    fclose(file);
-
-    if (key == NULL) {
-        fprintf(stderr, "REJECT: cannot load public key\n");
-        return 0;
-    }
-
-    if (EVP_PKEY_is_a(key, "ED25519") != 1) {
-        fprintf(stderr, "REJECT: expected an Ed25519 public key\n");
-        EVP_PKEY_free(key);
-        return 0;
-    }
-
-    EVP_MD_CTX *context = EVP_MD_CTX_new();
-    int valid = 0;
-
-    if (context != NULL &&
-        EVP_DigestVerifyInit(context, NULL, NULL, NULL, key) == 1) {
-        valid = EVP_DigestVerify(
-            context,
-            signature,
-            signature_length,
-            data,
-            data_length
-        ) == 1;
-    }
-
-    EVP_MD_CTX_free(context);
-    EVP_PKEY_free(key);
-
-    return valid;
+    return "unknown error";
 }
 
 int main(int argc, char **argv)
 {
-    if (argc != 4) {
-        fprintf(stderr,
-                "Usage: %s firmware.bin firmware.sig public.pem\n",
-                argv[0]);
+    if (argc != 3 && argc != 4) {
+        fprintf(stderr, "Usage: %s image.bin public.raw [min_version]\n", argv[0]);
         return EXIT_FAILURE;
     }
 
-    const size_t capacity = HEADER_SIZE + MAX_PAYLOAD;
-    unsigned char *firmware = malloc(capacity);
+    uint32_t min_version = DEFAULT_MIN_VERSION;
+    if (argc == 4) min_version = (uint32_t)strtoul(argv[3], NULL, 0);
 
-    if (firmware == NULL) {
-        fprintf(stderr, "ERROR: memory allocation failed\n");
+    uint8_t key[32];
+    size_t key_len = 0;
+    if (!read_file(argv[2], key, sizeof(key), &key_len) || key_len != 32) {
+        fprintf(stderr, "REJECT: public key must be exactly 32 raw bytes\n");
         return EXIT_FAILURE;
     }
 
-    unsigned char signature[SIGNATURE_SIZE];
-    size_t firmware_length = 0;
-    size_t signature_length = 0;
+    const size_t capacity = IMG_HEADER_SIZE + MAX_PAYLOAD + IMG_SIG_SIZE;
+    uint8_t *image = malloc(capacity);
+    if (image == NULL) { fprintf(stderr, "ERROR: out of memory\n"); return EXIT_FAILURE; }
+
     int result = EXIT_FAILURE;
+    size_t image_len = 0;
+    img_info info;
 
-    if (!read_file(argv[1], firmware, capacity, &firmware_length) ||
-        !read_file(argv[2], signature, sizeof(signature),
-                   &signature_length)) {
+    if (!read_file(argv[1], image, capacity, &image_len)) goto cleanup;
+
+    img_result r = img_verify(image, image_len, 0, min_version, key, &info);
+    if (r != IMG_OK) { fprintf(stderr, "REJECT: %s\n", result_name(r)); goto cleanup; }
+
+    if (image_len != IMG_HEADER_SIZE + info.payload_length + IMG_SIG_SIZE) {
+        fprintf(stderr, "REJECT: unexpected trailing data\n");
         goto cleanup;
     }
 
-    if (firmware_length < HEADER_SIZE) {
-        fprintf(stderr, "REJECT: truncated header\n");
-        goto cleanup;
-    }
-
-    if (memcmp(firmware, "FWUP", 4) != 0) {
-        fprintf(stderr, "REJECT: incorrect magic marker\n");
-        goto cleanup;
-    }
-
-    uint32_t version = read_u32_le(firmware + 4);
-    uint32_t payload_length = read_u32_le(firmware + 8);
-
-    if (payload_length == 0 || payload_length > MAX_PAYLOAD) {
-        fprintf(stderr, "REJECT: invalid payload length\n");
-        goto cleanup;
-    }
-
-    if ((size_t)payload_length != firmware_length - HEADER_SIZE) {
-        fprintf(stderr, "REJECT: payload length mismatch\n");
-        goto cleanup;
-    }
-
-    if (signature_length != SIGNATURE_SIZE) {
-        fprintf(stderr, "REJECT: incorrect signature length\n");
-        goto cleanup;
-    }
-
-    if (!verify_signature(argv[3], firmware, firmware_length,
-                          signature, signature_length)) {
-        fprintf(stderr, "REJECT: signature verification failed\n");
-        goto cleanup;
-    }
-
-    /* Apply version policy after authenticating the package. */
-    if (version < MIN_VERSION) {
-        fprintf(stderr,
-                "REJECT: version %" PRIu32 " is below minimum %u\n",
-                version, MIN_VERSION);
-        goto cleanup;
-    }
-
-    printf("ACCEPT: firmware version %" PRIu32
-           ", payload %" PRIu32 " bytes\n",
-           version, payload_length);
-
+    printf("ACCEPT: version %" PRIu32 ", payload %" PRIu32 " bytes, load 0x%08" PRIX32 "\n",
+           info.version, info.payload_length, info.load_addr);
     result = EXIT_SUCCESS;
 
 cleanup:
-    free(firmware);
+    free(image);
     return result;
 }

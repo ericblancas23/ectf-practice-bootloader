@@ -1,5 +1,14 @@
-keys/*
-verifier
-*.bin
-*.sig
-__pycache__/
+# Build outputs
+build/
+*.elf
+*.o
+
+# Signing keys - never commit
+keys/*.pem
+keys/*.raw
+
+# Local backups (factory firmware)
+backups/
+
+# Editor
+.vscode/
