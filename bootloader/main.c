@@ -1,11 +1,17 @@
 #include "stm32l4xx.h"
 #include "verify_core.h"
+#include "flash.h"
 #include "pubkey.h"
 
-#define SLOT_A_ADDR 0x08020000u
-#define SLOT_B_ADDR 0x08080000u
-#define SLOT_SIZE   0x60000u
-#define MIN_VERSION 0u          /* replaced by the rollback counter in Part 2 */
+#define SLOT_A_ADDR      0x08020000u
+#define SLOT_B_ADDR      0x08080000u
+#define SLOT_SIZE        0x60000u
+
+#define ROLLBACK_ADDR    0x08010000u
+#define ROLLBACK_SIZE    0x800u
+#define ROLLBACK_ENTRIES (ROLLBACK_SIZE / 8u)
+
+/* ---------------- clocks ---------------- */
 
 static void clock_80mhz(void)
 {
@@ -36,6 +42,8 @@ static void clock_restore(void)
     FLASH->ACR &= ~FLASH_ACR_LATENCY;
 }
 
+/* ---------------- LED ---------------- */
+
 static void led_init(void)
 {
     RCC->AHB2ENR |= RCC_AHB2ENR_GPIOAEN;
@@ -49,6 +57,46 @@ static void fail_forever(void)
         for (volatile uint32_t i = 0; i < 800000; i++) { }
     }
 }
+
+/* ---------------- rollback floor ---------------- */
+
+static uint32_t floor_read(void)
+{
+    const volatile uint32_t *log = (const volatile uint32_t *)ROLLBACK_ADDR;
+    uint32_t floor = 0;
+
+    for (uint32_t i = 0; i < ROLLBACK_ENTRIES; i++) {
+        uint32_t v  = log[2 * i];
+        uint32_t nv = log[2 * i + 1];
+        if (v == 0xFFFFFFFFu && nv == 0xFFFFFFFFu) break;   /* end of log */
+        if (v == ~nv && v > floor) floor = v;               /* skip corrupt entries */
+    }
+    return floor;
+}
+
+static int floor_raise(uint32_t version)
+{
+    const volatile uint32_t *log = (const volatile uint32_t *)ROLLBACK_ADDR;
+    uint32_t i;
+
+    for (i = 0; i < ROLLBACK_ENTRIES; i++) {
+        if (log[2 * i] == 0xFFFFFFFFu && log[2 * i + 1] == 0xFFFFFFFFu) break;
+    }
+
+    flash_unlock();
+    int r = 0;
+    if (i == ROLLBACK_ENTRIES) {          /* log full: start over (weak spot, see Phase 9) */
+        r = flash_erase_page(ROLLBACK_ADDR);
+        i = 0;
+    }
+    if (r == 0) r = flash_program_u64(ROLLBACK_ADDR + 8u * i, version, ~version);
+    flash_lock();
+
+    if (r == 0 && floor_read() < version) r = -1;   /* read back to confirm */
+    return r;
+}
+
+/* ---------------- boot ---------------- */
 
 static void jump_to(uint32_t vector_table)
 {
@@ -71,10 +119,10 @@ static void jump_to(uint32_t vector_table)
     __asm volatile ("msr msp, %0\n\tbx %1" :: "r"(sp), "r"(pc));
 }
 
-static int slot_valid(uint32_t base, img_info *info)
+static int slot_valid(uint32_t base, uint32_t min_version, img_info *info)
 {
     return img_verify((const uint8_t *)base, SLOT_SIZE, base,
-                      MIN_VERSION, PUBKEY, info) == IMG_OK;
+                      min_version, PUBKEY, info) == IMG_OK;
 }
 
 int main(void)
@@ -83,20 +131,23 @@ int main(void)
     GPIOA->ODR |= (1u << 5);
     clock_80mhz();
 
-    img_info a, b;
-    int a_ok = slot_valid(SLOT_A_ADDR, &a);
-    int b_ok = slot_valid(SLOT_B_ADDR, &b);
+    uint32_t floor = floor_read();
 
-    uint32_t boot = 0;
-    if (a_ok && b_ok) {
-        boot = (b.version > a.version) ? SLOT_B_ADDR : SLOT_A_ADDR;  /* tie -> A */
-    } else if (a_ok) {
-        boot = SLOT_A_ADDR;
+    img_info a, b;
+    int a_ok = slot_valid(SLOT_A_ADDR, floor, &a);
+    int b_ok = slot_valid(SLOT_B_ADDR, floor, &b);
+
+    uint32_t boot = 0, version = 0;
+    if (a_ok && (!b_ok || a.version >= b.version)) {
+        boot = SLOT_A_ADDR; version = a.version;
     } else if (b_ok) {
-        boot = SLOT_B_ADDR;
+        boot = SLOT_B_ADDR; version = b.version;
     }
 
     if (boot != 0) {
+        if (version > floor) {
+            (void)floor_raise(version);   /* image is already verified; boot even if this fails */
+        }
         GPIOA->ODR &= ~(1u << 5);
         jump_to(boot + IMG_HEADER_SIZE);
     }

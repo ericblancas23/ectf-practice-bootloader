@@ -31,8 +31,8 @@ build/verifier: host/verifier.c common/verify_core.c common/verify_core.h $(MONO
 build/pubkey.h: keys/public.raw | build
 > python3 -c "import sys; b=open(sys.argv[1],'rb').read(); assert len(b)==32; print('static const unsigned char PUBKEY[32] = {' + ','.join(hex(x) for x in b) + '};')" $< > $@
 
-build/bootloader.elf: bootloader/main.c bootloader/bootloader.ld common/verify_core.c common/verify_core.h $(MONO) $(CMSIS) build/pubkey.h
-> $(CC_ARM) $(CFLAGS) $(LDFLAGS) -T bootloader/bootloader.ld bootloader/main.c common/verify_core.c $(MONO) $(CMSIS) -o $@
+build/bootloader.elf: bootloader/main.c bootloader/flash.c bootloader/flash.h bootloader/bootloader.ld common/verify_core.c common/verify_core.h $(MONO) $(CMSIS) build/pubkey.h
+> $(CC_ARM) $(CFLAGS) $(LDFLAGS) -T bootloader/bootloader.ld bootloader/main.c bootloader/flash.c common/verify_core.c $(MONO) $(CMSIS) -o $@
 
 # Apps always rebuild so VERSION_x / DELAY_x changes take effect.
 build/app_a.elf: FORCE | build
@@ -75,3 +75,14 @@ clean:
 FORCE:
 
 .PHONY: all flash-boot flash-a flash-b wipe-a wipe-b clean FORCE
+
+ROLLBACK = 0x08010000
+
+dump-floor: | build
+> st-flash read build/rollback.bin $(ROLLBACK) 0x800
+> xxd build/rollback.bin | head -n 4
+
+reset-floor:
+> openocd -f board/st_nucleo_l4.cfg -c "init; reset halt; flash erase_address $(ROLLBACK) 0x800; reset halt; shutdown"
+
+.PHONY: dump-floor reset-floor
