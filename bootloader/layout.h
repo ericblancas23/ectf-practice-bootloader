@@ -1,0 +1,10 @@
+#pragma once
+#define SLOT_A_ADDR 0x08020000u
+#define SLOT_B_ADDR 0x08080000u
+#define SLOT_SIZE 0x60000u
+#define PAGE_SIZE 0x800u
+
+#define ROLLBACK_ADDR 0x08010000u
+#define ROLLBACK_SIZE 0x800u
+
+
